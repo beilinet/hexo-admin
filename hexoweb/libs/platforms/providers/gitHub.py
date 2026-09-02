@@ -12,7 +12,8 @@ class Github(Provider):
         self._repo = repo
         self.branch = branch
         self.path = path if path != "/" else ""
-        self.repo = github.Github(self.token).get_repo(self._repo)
+        # Vercel's function timeout is shorter than PyGithub's default timeout.
+        self.repo = github.Github(self.token, timeout=5).get_repo(self._repo)
 
     params = {'token': {"description": "Github 密钥", "placeholder": "token"},
               'repo': {"description": "Github 仓库", "placeholder": "username/repo"},

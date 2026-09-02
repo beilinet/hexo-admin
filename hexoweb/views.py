@@ -89,11 +89,13 @@ def update_view(request):
                              "params": {"token": get_setting("GH_TOKEN"),
                                         "branch": get_setting("GH_REPO_BRANCH"),
                                         "repo": get_setting("GH_REPO"),
-                                        "path": get_setting("GH_PATH")}}
-                context["settings"].append(dict(name=setting[0], value=json.dumps(_provider),
+                                        "path": get_setting("GH_REPO_PATH") or get_setting("GH_PATH"),
+                                        "config": "Hexo"}}
+                provider_json = json.dumps(_provider, ensure_ascii=False)
+                context["settings"].append(dict(name=setting[0], value=provider_json,
                                                 placeholder=setting[3]))
                 if verify_provider(_provider)["status"] == 1:
-                    save_setting("PROVIDER", _provider)
+                    save_setting("PROVIDER", provider_json)
                 else:
                     context["msg"] = "自动生成PROVIDER错误，请检查配置并提交"
 
@@ -381,6 +383,9 @@ def index(request):
         return redirect("/update/")
     context = {'segment': 'index'}
     context.update(get_custom_config())
+    provider = Provider()
+    if provider is None:
+        context["error"] = "博客仓库连接配置不可用，请前往设置检查Provider配置"
     cache = Cache.objects.filter(name="posts")
     if cache.count():
         posts = json.loads(cache.first().content)
@@ -693,7 +698,10 @@ def pages(request):
                 # 更新通道
                 context["ALL_UPDATES"] = json.loads(get_setting("ALL_UPDATES"))
                 context["ALL_PLATFORM_CONFIGS"] = platform_configs()
-                context["NOW_PLATFORM_CONFIG"] = Provider().config["name"]
+                provider = Provider()
+                context["NOW_PLATFORM_CONFIG"] = provider.config["name"] if provider else "Hexo"
+                if provider is None or request.GET.get("provider_error"):
+                    context["error"] = "博客仓库连接配置不可用，请重新保存Provider配置"
                 # Get Auto Excerpt Settings
                 context["AUTO_EXCERPT_CONFIG"] = get_setting("AUTO_EXCERPT_CONFIG")
                 context["AUTO_EXCERPT_SAVE_KEY"] = json.loads(context["AUTO_EXCERPT_CONFIG"]).get("save_key", "excerpt")

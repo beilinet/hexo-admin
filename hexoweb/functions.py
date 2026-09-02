@@ -1,3 +1,4 @@
+import ast
 import json
 import logging
 import os
@@ -40,25 +41,108 @@ def get_setting(name):
         return ""
 
 
+_Provider = None
+_provider_retry_after = 0
+_provider_last_error = None
+_PROVIDER_RETRY_SECONDS = 60
+
+
+def _legacy_provider_config():
+    """Build a Qexo 2.x provider config from the Qexo 1.x settings."""
+    token = get_setting("GH_TOKEN")
+    repo = get_setting("GH_REPO")
+    if not token or not repo:
+        return None
+
+    return {
+        "provider": "github",
+        "params": {
+            "token": token,
+            "repo": repo,
+            "branch": get_setting("GH_REPO_BRANCH") or "master",
+            "path": get_setting("GH_REPO_PATH") or get_setting("GH_PATH") or "",
+            "config": "Hexo"
+        }
+    }
+
+
+def _load_provider_config():
+    """Read and normalize PROVIDER, falling back to Qexo 1.x settings."""
+    raw_config = get_setting("PROVIDER")
+    config = None
+
+    if raw_config:
+        try:
+            config = json.loads(raw_config)
+        except (TypeError, ValueError):
+            # Some older migration paths stored ``str(dict)`` instead of JSON.
+            try:
+                config = ast.literal_eval(raw_config)
+            except (SyntaxError, ValueError):
+                logging.exception("PROVIDER配置无法解析，尝试恢复旧版Github配置")
+
+    legacy_config = _legacy_provider_config()
+    if not isinstance(config, dict):
+        config = legacy_config
+    if not isinstance(config, dict):
+        raise ValueError("未找到有效的PROVIDER或旧版Github配置")
+
+    provider_name = config.get("provider")
+    params = config.get("params")
+    if not provider_name or not isinstance(params, dict):
+        raise ValueError("PROVIDER配置缺少provider或params")
+
+    params = dict(params)
+    if provider_name == "github" and legacy_config:
+        legacy_params = legacy_config["params"]
+        for key in ("token", "repo", "branch", "path"):
+            if not params.get(key):
+                params[key] = legacy_params[key]
+
+    params.setdefault("config", "Hexo")
+    return {"provider": provider_name, "params": params}
+
+
 def update_provider():
-    global _Provider
-    _provider = json.loads(get_setting("PROVIDER"))
-    _Provider = get_provider(_provider["provider"], **_provider["params"])
+    global _Provider, _provider_retry_after, _provider_last_error
+    provider_config = _load_provider_config()
+    provider = get_provider(provider_config["provider"], **provider_config["params"])
+
+    # Persist a canonical JSON value after recovering legacy/malformed settings.
+    normalized = json.dumps(provider_config, ensure_ascii=False)
+    try:
+        saved_config = json.loads(get_setting("PROVIDER"))
+    except (TypeError, ValueError):
+        saved_config = None
+    if saved_config != provider_config:
+        save_setting("PROVIDER", normalized)
+
+    _Provider = provider
+    _provider_retry_after = 0
+    _provider_last_error = None
     return _Provider
 
 
-try:
-    _Provider = update_provider()
-except Exception:
-    logging.error("Provider获取失败, 跳过")
-
-
-def Provider():
-    try:
+def Provider(force_refresh=False):
+    global _provider_retry_after, _provider_last_error
+    if _Provider is not None and not force_refresh:
         return _Provider
-    except Exception:
-        logging.error("Provider获取错误, 重新获取")
+
+    now = time()
+    if not force_refresh and now < _provider_retry_after:
+        return None
+
+    try:
         return update_provider()
+    except Exception as error:
+        _provider_last_error = "{}: {}".format(type(error).__name__, error)
+        _provider_retry_after = now + _PROVIDER_RETRY_SECONDS
+        logging.exception("Provider获取失败，后台将以降级模式运行")
+        return None
+
+
+def get_provider_error():
+    return _provider_last_error
 
 
 @register.filter  # 在模板中使用range()
@@ -143,7 +227,11 @@ def update_posts_cache(s=None):
             return posts
     else:
         old_cache = False
-    posts = Provider().get_posts()
+    provider = Provider()
+    if provider is None:
+        logging.error("Provider不可用，暂不刷新文章缓存")
+        return []
+    posts = provider.get_posts()
     if s:
         if not old_cache.count():
             update_caches("posts", posts)
@@ -175,7 +263,11 @@ def update_pages_cache(s=None):
             cache_name = "pages." + str(s)
             update_caches(cache_name, posts)
             return posts
-    results = Provider().get_pages()
+    provider = Provider()
+    if provider is None:
+        logging.error("Provider不可用，暂不刷新页面缓存")
+        return []
+    results = provider.get_pages()
     update_caches("pages", results)
     if not s:
         return results
@@ -203,7 +295,11 @@ def update_configs_cache(s=None):
             cache_name = "configs." + str(s)
             update_caches(cache_name, posts)
             return posts
-    results = Provider().get_configs()
+    provider = Provider()
+    if provider is None:
+        logging.error("Provider不可用，暂不刷新配置缓存")
+        return []
+    results = provider.get_configs()
     update_caches("configs", results)
     if not s:
         return results
@@ -270,7 +366,7 @@ def get_latest_version():
     try:
         provider = json.loads(get_setting("PROVIDER"))
         if provider["provider"] == "github":
-            user = github.Github(provider["params"]["token"])
+            user = github.Github(provider["params"]["token"], timeout=5)
             latest = user.get_repo("am-abudu/Qexo").get_latest_release()
             logging.info("获取更新成功: {}".format(latest.tag_name))
             if latest.tag_name and (latest.tag_name != QEXO_VERSION):
@@ -285,7 +381,10 @@ def get_latest_version():
             context["newer_text"] = markdown(latest.body).replace("\n", "")
             context["status"] = True
         else:
-            latest = requests.get("https://api.github.com/repos/Qexo/Qexo/releases/latest").json()
+            latest = requests.get(
+                "https://api.github.com/repos/Qexo/Qexo/releases/latest",
+                timeout=(2, 3)
+            ).json()
             logging.info("获取更新成功: {}".format(latest["tag_name"]))
             if latest["tag_name"] and (latest["tag_name"] != QEXO_VERSION):
                 context["hasNew"] = True
