@@ -2,8 +2,10 @@ import json
 from unittest.mock import patch
 
 from django.test import SimpleTestCase
+from django.test import RequestFactory
 
 from . import functions
+from .views import _safe_login_redirect
 
 
 class ProviderRecoveryTests(SimpleTestCase):
@@ -81,5 +83,20 @@ class ProviderRecoveryTests(SimpleTestCase):
         self.assertIsNone(functions.Provider())
         self.assertEqual(get_provider.call_count, 1)
         self.assertIn("TimeoutError", functions.get_provider_error())
+
+
+class LoginRedirectTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def test_decodes_local_root_redirect(self):
+        request = self.factory.get("/login/?next=%2F")
+
+        self.assertEqual(_safe_login_redirect(request), "/")
+
+    def test_rejects_external_redirect(self):
+        request = self.factory.get("/login/?next=https%3A%2F%2Fevil.example")
+
+        self.assertEqual(_safe_login_redirect(request), "/")
 
 # Create your tests here.

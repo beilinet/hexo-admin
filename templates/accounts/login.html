@@ -71,10 +71,14 @@
 
     <script>
         function get_direct_link() {
-            let reg = new RegExp("(^|&)next=([^&]*)(&|$)");
-            let r = window.location.search.substr(1).match(reg);
-            if (r != null) return decodeURI(r[2]);
-            return "/";
+            const target = new URLSearchParams(window.location.search).get("next") || "/";
+            try {
+                const redirect = new URL(target, window.location.origin);
+                if (redirect.origin !== window.location.origin) return "/";
+                return redirect.pathname + redirect.search + redirect.hash;
+            } catch (error) {
+                return "/";
+            }
         }
 
         function submit() {
@@ -120,7 +124,9 @@
                 success: function (res) {
                     if (res.status) {
                         notyf.success(res.msg);
-                        setTimeout(window.location = get_direct_link(), 1000);
+                        setTimeout(function () {
+                            window.location.assign(get_direct_link());
+                        }, 1000);
                     } else {
                         notyf.error(res.msg);
                         {% if site_token_v2 %}

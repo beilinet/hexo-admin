@@ -8,6 +8,7 @@ from django.contrib.auth import logout
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.template import loader
+from django.utils.http import url_has_allowed_host_and_scheme
 
 from hexoweb.libs.image import all_providers as all_image_providers
 from hexoweb.libs.image import get_params as get_image_params
@@ -31,6 +32,16 @@ def page_500(request):
                   {"error": "程序遇到了错误！", "cdn_prev": "https://unpkg.com/", "cdnjs": "https://cdn.staticfile.org/"})
 
 
+def _safe_login_redirect(request):
+    target = unquote(request.GET.get("next", ""))
+    if target and url_has_allowed_host_and_scheme(
+            target,
+            allowed_hosts={request.get_host()},
+            require_https=request.is_secure()):
+        return target
+    return "/"
+
+
 def login_view(request):
     try:
         if int(get_setting("INIT")) <= 5:
@@ -40,10 +51,7 @@ def login_view(request):
         logging.info("未检测到初始化配置, 转跳到初始化页面")
         return redirect("/init/")
     if request.user.is_authenticated:
-        if not request.GET.get("next"):
-            return redirect("/")
-        else:
-            return redirect(unquote(request.GET.get("next")))
+        return redirect(_safe_login_redirect(request))
     context = get_custom_config()
     site_token = get_setting("LOGIN_RECAPTCHA_SITE_TOKEN")
     server_token = get_setting("LOGIN_RECAPTCHA_SERVER_TOKEN")
@@ -429,7 +437,9 @@ def pages(request):
         return redirect("/update/")
     try:
         context.update(get_custom_config())
-        load_template = request.path.split('/')[-1]
+        load_template = request.path.rstrip('/').split('/')[-1]
+        if not load_template:
+            return index(request)
         context['segment'] = load_template
         if "index" in load_template:
             return index(request)
