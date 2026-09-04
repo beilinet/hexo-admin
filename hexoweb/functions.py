@@ -1288,22 +1288,46 @@ def _bulk_import(model_class, data, field_mapping_func, model_name):
 
 
 def import_settings(ss):
-    imported = _bulk_import(
-        SettingModel,
-        ss,
-        lambda s: SettingModel(
-            name=_as_text_value(_safe_get(s, "name", "")),
-            content=_as_text_value(_safe_get(s, "content", ""), "")
-        ),
-        "设置"
-    )
-    if imported:
-        # Older exports do not contain settings introduced by newer Qexo
-        # versions. Re-seed required defaults after the atomic import.
+    try:
+        if ss is None:
+            ss = []
+        if not isinstance(ss, list):
+            raise TypeError(f"导入数据必须是列表，实际为: {type(ss).__name__}")
+
+        # Keep the first value for duplicate legacy settings, matching fix_all's
+        # old behavior without issuing one delete/insert pair per setting.
+        contents = {}
+        order = []
+        for item in ss:
+            name = _as_text_value(_safe_get(item, "name", ""))
+            if name not in contents:
+                contents[name] = _as_text_value(_safe_get(item, "content", ""), "")
+                order.append(name)
+
+        # Add settings introduced by newer releases and replace values marked
+        # as resettable.  Do all database writes in one atomic bulk operation so
+        # importing through a Vercel Function stays below its request limit.
+        for name, default, reset, _desc in ALL_SETTINGS:
+            if name not in contents:
+                order.append(name)
+            if reset or name not in contents:
+                content = _as_text_value(default, "")
+                if name == "WEBHOOK_APIKEY":
+                    content = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                contents[name] = content
+
+        objects = [SettingModel(name=name, content=contents[name]) for name in order]
+        with transaction.atomic():
+            SettingModel.objects.all().delete()
+            if objects:
+                SettingModel.objects.bulk_create(objects, batch_size=1000)
+
         clear_setting_cache()
-        fix_all()
-        clear_setting_cache()
-    return imported
+        logging.info(gettext("IMPORT_SUCCESS").format("设置"))
+        return True
+    except Exception as e:
+        logging.error(gettext("IMPORT_FAILED").format("设置", str(e)))
+        return False
 
 
 def import_images(ss):

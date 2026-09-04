@@ -516,6 +516,26 @@ class MigrateViewDataSafetyTests(TestCase):
         self.assertTrue(SettingModel.objects.filter(name="LANGUAGE").exists())
         self.assertTrue(SettingModel.objects.filter(name="ALL_CDN_PREV").exists())
 
+    def test_import_settings_uses_bounded_database_queries(self):
+        legacy_settings = [
+            {"name": f"LEGACY_{index}", "content": f"value-{index}"}
+            for index in range(100)
+        ]
+        legacy_settings.extend([
+            {"name": "QEXO_NAME", "content": "Legacy Admin"},
+            {"name": "LANGUAGE", "content": "outdated"},
+            {"name": "QEXO_NAME", "content": "duplicate"},
+        ])
+
+        with CaptureQueriesContext(connection) as queries:
+            imported = app_functions.import_settings(legacy_settings)
+
+        self.assertTrue(imported)
+        self.assertLessEqual(len(queries), 5)
+        self.assertEqual(SettingModel.objects.get(name="QEXO_NAME").content, "Legacy Admin")
+        self.assertEqual(SettingModel.objects.get(name="LANGUAGE").content, "zh_CN")
+        self.assertEqual(SettingModel.objects.filter(name="QEXO_NAME").count(), 1)
+
 
 class ProviderCompatibilityTests(TestCase):
     def setUp(self):
