@@ -2,9 +2,11 @@ from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, IntegrityError
 from django.test import SimpleTestCase, TransactionTestCase, TestCase, Client
+from django.test.utils import CaptureQueriesContext
 from django.urls import resolve, reverse
 from django.contrib.auth.models import User
 import json
+import hashlib
 import uuid
 from unittest.mock import Mock, patch
 
@@ -15,6 +17,8 @@ from hexoweb.models import (
     StatisticUV, StatisticPV
 )
 from hexoweb.libs.image.providers.cfimgbed import Main as CFImgBedMain, delete as cfimgbed_delete
+from hexoweb.init import InitService
+from core.qexoSettings import ALL_SETTINGS
 
 
 # ===== URL 烟雾测试 =====
@@ -115,6 +119,30 @@ class SettingModelTests(TestCase):
         default_content = "default_setting_value"
         content = SettingModel.objects.get_content_by_name("NONEXISTENT_SETTING", default_content)
         self.assertEqual(content, default_content)
+
+
+class InitSettingsTests(TestCase):
+    def test_seed_missing_settings_uses_bulk_insert_and_hashes_webhook_key(self):
+        service = InitService()
+
+        with CaptureQueriesContext(connection) as queries:
+            service.seed_missing_settings()
+
+        self.assertLessEqual(len(queries), 4)
+        self.assertEqual(SettingModel.objects.count(), len(ALL_SETTINGS))
+        raw_key = next(setting[1] for setting in ALL_SETTINGS if setting[0] == "WEBHOOK_APIKEY")
+        self.assertEqual(
+            SettingModel.objects.get(name="WEBHOOK_APIKEY").content,
+            hashlib.sha256(raw_key.encode("utf-8")).hexdigest(),
+        )
+
+    def test_seed_missing_settings_preserves_existing_values(self):
+        SettingModel.objects.create(name="QEXO_NAME", content="My Blog")
+
+        InitService().seed_missing_settings()
+
+        self.assertEqual(SettingModel.objects.get(name="QEXO_NAME").content, "My Blog")
+        self.assertEqual(SettingModel.objects.count(), len(ALL_SETTINGS))
 
 
 class ImageModelTests(TestCase):

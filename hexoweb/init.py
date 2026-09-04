@@ -1,6 +1,8 @@
 import json
 import random
 import os
+import hashlib
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -43,9 +45,20 @@ class InitService:
 
     def seed_missing_settings(self) -> None:
         existing = set(SettingModel.objects.values_list("name", flat=True))
+        missing = []
         for name, default, _reset, _desc in ALL_SETTINGS:
             if name not in existing:
-                save_setting(name, default)
+                normalized_name = unicodedata.normalize("NFC", str(name))
+                normalized_content = unicodedata.normalize("NFC", str(default or ""))
+                if normalized_name == "WEBHOOK_APIKEY":
+                    normalized_content = hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
+                missing.append(SettingModel(name=normalized_name, content=normalized_content))
+
+        # Neon may be in a different region from the Function.  Inserting every
+        # setting through save_setting() costs two database round trips per item
+        # and can exceed Vercel Hobby's 10-second request limit during setup.
+        if missing:
+            SettingModel.objects.bulk_create(missing)
 
     def ensure_webhook_apikey(self, apikey: Optional[str]) -> None:
         if apikey:
