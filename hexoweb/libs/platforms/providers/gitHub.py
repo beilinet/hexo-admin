@@ -13,7 +13,7 @@ class Github(Provider):
         self.branch = branch
         normalized_path = (path or "").strip("/")
         self.path = f"{normalized_path}/" if normalized_path else ""
-        self.repo = github.Github(self.token).get_repo(self._repo)
+        self.repo = github.Github(self.token, timeout=5).get_repo(self._repo)
 
     params = {'token': {"description": "Github 密钥", "placeholder": "token"},
               'repo': {"description": "Github 仓库", "placeholder": "username/repo"},

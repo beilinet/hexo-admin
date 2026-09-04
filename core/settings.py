@@ -5,6 +5,7 @@ import random
 import hexoweb.exceptions as exceptions
 import logging
 import urllib3
+from urllib.parse import parse_qs, unquote, urlparse
 from core.session_engine import get_session_engine
 
 urllib3.disable_warnings()
@@ -78,7 +79,25 @@ WSGI_APPLICATION = 'core.wsgi.application'
 
 errors = ""
 
-if os.environ.get("MONGODB_HOST"):  # 使用MONGODB
+database_backend = os.environ.get("QEXO_DB_BACKEND", "").strip().lower()
+database_url = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
+
+if database_backend and database_backend not in {"mongodb", "postgres", "postgresql", "mysql"}:
+    raise exceptions.InitError("QEXO_DB_BACKEND 仅支持 mongodb、postgres 或 mysql")
+
+use_mongodb_env = database_backend == "mongodb" or (
+    not database_backend and bool(os.environ.get("MONGODB_HOST"))
+)
+use_postgres_env = database_backend in {"postgres", "postgresql"} or (
+    not database_backend
+    and not use_mongodb_env
+    and bool(os.environ.get("PG_HOST") or os.environ.get("POSTGRES_HOST") or database_url)
+)
+use_mysql_env = database_backend == "mysql" or (
+    not database_backend and not use_mongodb_env and not use_postgres_env and bool(os.environ.get("MYSQL_HOST"))
+)
+
+if use_mongodb_env:  # 使用MONGODB
     logging.info("使用环境变量中的MongoDB数据库")
     for env in ["MONGODB_HOST", "MONGODB_PORT", "MONGODB_PASS"]:
         if env not in os.environ:
@@ -101,28 +120,49 @@ if os.environ.get("MONGODB_HOST"):  # 使用MONGODB
             }
         }
     }
-elif os.environ.get("PG_HOST") or os.environ.get("POSTGRES_HOST"):  # 使用 PostgreSQL
+elif use_postgres_env:  # 使用 PostgreSQL
     logging.info("使用环境变量中的PostgreSQL数据库")
-    for env in ["PG_HOST", "PG_PASS"]:
-        if (env not in os.environ) and (env.replace("PG_", "POSTGRES_") not in os.environ):  # 识别不同的格式
-            if env == "PG_USER" and "POSTGRES_USERNAME" in os.environ:
-                continue
-            if env == "PG_PASS" and "POSTGRES_PASSWORD" in os.environ:
-                continue
-            errors += f"\"{env}\" "
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': os.environ.get("PG_DB") or os.environ.get("POSTGRES_DB") or os.environ.get(
-                "POSTGRES_DATABASE") or "root",
-            'USER': os.environ.get("PG_USER") or os.environ.get("POSTGRES_USERNAME") or os.environ.get(
-                "POSTGRES_USER") or "root",
-            'PASSWORD': os.environ.get("PG_PASS") or os.environ.get("POSTGRES_PASSWORD"),
-            'HOST': os.environ.get("PG_HOST") or os.environ.get("POSTGRES_HOST"),
-            'PORT': os.environ.get("PG_PORT") or os.environ.get("POSTGRES_PORT") or 5432,
+    if database_url:
+        parsed_database_url = urlparse(database_url)
+        if parsed_database_url.scheme not in {"postgres", "postgresql"}:
+            errors += "DATABASE_URL(PostgreSQL) "
+        database_options = {}
+        query_options = parse_qs(parsed_database_url.query)
+        if query_options.get("sslmode"):
+            database_options["sslmode"] = query_options["sslmode"][-1]
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.postgresql',
+                'NAME': unquote(parsed_database_url.path.lstrip("/")),
+                'USER': unquote(parsed_database_url.username or ""),
+                'PASSWORD': unquote(parsed_database_url.password or ""),
+                'HOST': parsed_database_url.hostname,
+                'PORT': parsed_database_url.port or 5432,
+                'OPTIONS': database_options,
+                'CONN_MAX_AGE': 0,
+            }
         }
-    }
-elif os.environ.get("MYSQL_HOST"):  # 使用MYSQL
+    else:
+        pg_host = os.environ.get("PG_HOST") or os.environ.get("POSTGRES_HOST")
+        pg_password = os.environ.get("PG_PASS") or os.environ.get("POSTGRES_PASSWORD")
+        if not pg_host:
+            errors += '"PG_HOST/POSTGRES_HOST" '
+        if not pg_password:
+            errors += '"PG_PASS/POSTGRES_PASSWORD" '
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.postgresql',
+                'NAME': os.environ.get("PG_DB") or os.environ.get("POSTGRES_DB") or os.environ.get(
+                    "POSTGRES_DATABASE") or "root",
+                'USER': os.environ.get("PG_USER") or os.environ.get("POSTGRES_USERNAME") or os.environ.get(
+                    "POSTGRES_USER") or "root",
+                'PASSWORD': pg_password,
+                'HOST': pg_host,
+                'PORT': os.environ.get("PG_PORT") or os.environ.get("POSTGRES_PORT") or 5432,
+                'CONN_MAX_AGE': 0,
+            }
+        }
+elif use_mysql_env:  # 使用MYSQL
     logging.info("使用环境变量中的MySQL数据库")
     for env in ["MYSQL_HOST", "MYSQL_PORT", "MYSQL_PASSWORD"]:
         if env not in os.environ:

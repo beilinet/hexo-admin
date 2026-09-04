@@ -1,3 +1,4 @@
+import ast
 import json
 import logging
 import os
@@ -152,25 +153,107 @@ def gettext(value):
     return value
 
 
+_Provider = None
+_provider_retry_after = 0
+_provider_last_error = None
+_PROVIDER_RETRY_SECONDS = 60
+
+
+def _legacy_provider_config():
+    """Build a Qexo 2.x provider config from legacy GitHub settings."""
+    token = get_setting("GH_TOKEN")
+    repo = get_setting("GH_REPO")
+    if not token or not repo:
+        return None
+
+    return {
+        "provider": "github",
+        "params": {
+            "token": token,
+            "repo": repo,
+            "branch": get_setting("GH_REPO_BRANCH") or "master",
+            "path": get_setting("GH_REPO_PATH") or get_setting("GH_PATH") or "",
+            "config": "Hexo",
+        },
+    }
+
+
+def _load_provider_config():
+    """Normalize PROVIDER and recover configurations exported by older Qexo versions."""
+    raw_config = get_setting("PROVIDER")
+    provider_config = None
+    if raw_config:
+        try:
+            provider_config = json.loads(raw_config)
+        except (TypeError, ValueError):
+            try:
+                provider_config = ast.literal_eval(raw_config)
+            except (SyntaxError, ValueError):
+                logging.exception("PROVIDER configuration is invalid; trying legacy settings")
+
+    legacy_config = _legacy_provider_config()
+    if not isinstance(provider_config, dict):
+        provider_config = legacy_config
+    if not isinstance(provider_config, dict):
+        raise ValueError("No valid PROVIDER or legacy GitHub configuration was found")
+
+    provider_name = provider_config.get("provider")
+    params = provider_config.get("params")
+    if not provider_name or not isinstance(params, dict):
+        raise ValueError("PROVIDER configuration is missing provider or params")
+
+    params = dict(params)
+    if provider_name == "github" and legacy_config:
+        for key, value in legacy_config["params"].items():
+            if not params.get(key):
+                params[key] = value
+    params.setdefault("config", "Hexo")
+    return {"provider": provider_name, "params": params}
+
+
 def update_provider():
-    global _Provider
-    _provider = json.loads(get_setting("PROVIDER"))
-    _Provider = get_provider(_provider["provider"], **_provider["params"])
+    global _Provider, _provider_retry_after, _provider_last_error
+    provider_config = _load_provider_config()
+    provider = get_provider(provider_config["provider"], **provider_config["params"])
+
+    save_func = globals().get("save_setting")
+    if callable(save_func):
+        try:
+            saved_config = json.loads(get_setting("PROVIDER"))
+        except (TypeError, ValueError):
+            saved_config = None
+        if saved_config != provider_config:
+            save_func("PROVIDER", json.dumps(provider_config, ensure_ascii=False))
+
+    _Provider = provider
+    _provider_retry_after = 0
+    _provider_last_error = None
     return _Provider
 
 
-try:
-    _Provider = update_provider()
-except Exception:
-    logging.error(gettext("ERROR_GETTING_PROVIDER") + ": " + gettext("JUMPED"))
-
-
-def Provider():
-    try:
+def Provider(force_refresh=False):
+    global _provider_retry_after, _provider_last_error
+    if _Provider is not None and not force_refresh:
         return _Provider
-    except Exception:
-        logging.error(gettext("ERROR_GETTING_PROVIDER") + ": " + gettext("RETRY"))
+
+    now = time()
+    if not force_refresh and now < _provider_retry_after:
+        return None
+
+    try:
         return update_provider()
+    except Exception as error:
+        _provider_last_error = f"{type(error).__name__}: {error}"
+        _provider_retry_after = now + _PROVIDER_RETRY_SECONDS
+        logging.exception("Provider initialization failed; running in degraded mode")
+        return None
+
+
+def get_provider_error():
+    return _provider_last_error
+
+
+Provider()
 
 
 @register.filter  # 在模板中使用range()
@@ -334,16 +417,36 @@ def _get_cached_or_fresh_data(cache_name, provider_method, search_term=None):
         return results
 
 
+def _update_provider_cache(cache_name, method_name, search_term=None):
+    provider = Provider()
+    if provider is None:
+        logging.error("Provider unavailable; serving cached %s data", cache_name)
+        cache = Cache.objects.filter(name=cache_name).first()
+        if not cache:
+            return []
+        try:
+            data = json.loads(cache.content)
+            return _filter_items_by_search(data, search_term)
+        except Exception:
+            return []
+
+    return _get_cached_or_fresh_data(
+        cache_name,
+        getattr(provider, method_name),
+        search_term,
+    )
+
+
 def update_posts_cache(s=None):
-    return _get_cached_or_fresh_data("posts", Provider().get_posts, s)
+    return _update_provider_cache("posts", "get_posts", s)
 
 
 def update_pages_cache(s=None):
-    return _get_cached_or_fresh_data("pages", Provider().get_pages, s)
+    return _update_provider_cache("pages", "get_pages", s)
 
 
 def update_configs_cache(s=None):
-    return _get_cached_or_fresh_data("configs", Provider().get_configs, s)
+    return _update_provider_cache("configs", "get_configs", s)
 
 
 def get_cached_list(cache_name, update_func, search=None):
@@ -1182,7 +1285,7 @@ def _bulk_import(model_class, data, field_mapping_func, model_name):
 
 
 def import_settings(ss):
-    return _bulk_import(
+    imported = _bulk_import(
         SettingModel,
         ss,
         lambda s: SettingModel(
@@ -1191,6 +1294,13 @@ def import_settings(ss):
         ),
         "设置"
     )
+    if imported:
+        # Older exports do not contain settings introduced by newer Qexo
+        # versions. Re-seed required defaults after the atomic import.
+        clear_setting_cache()
+        fix_all()
+        clear_setting_cache()
+    return imported
 
 
 def import_images(ss):

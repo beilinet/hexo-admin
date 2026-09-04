@@ -8,6 +8,7 @@ from django.contrib.auth import logout
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.template import loader
+from django.utils.http import url_has_allowed_host_and_scheme
 
 import hexoweb.libs.i18n
 from hexoweb.libs.image import all_providers as all_image_providers
@@ -38,6 +39,16 @@ def page_500(request):
                       {"error": repr(e), "cdn_prev": "https://registry.npmmirror.com/qexo-static/{version}/files/qexo".format(version=QEXO_STATIC)})
 
 
+def _safe_login_redirect(request):
+    target = unquote(request.GET.get("next", ""))
+    if target and url_has_allowed_host_and_scheme(
+            target,
+            allowed_hosts={request.get_host()},
+            require_https=request.is_secure()):
+        return target
+    return "/"
+
+
 def login_view(request):
     try:
         if int(get_setting_cached("INIT")) <= 5:
@@ -47,10 +58,7 @@ def login_view(request):
         logging.info(gettext("NOT_INIT"))
         return redirect("/init/")
     if request.user.is_authenticated:
-        if not request.GET.get("next"):
-            return redirect("/")
-        else:
-            return redirect(unquote(request.GET.get("next")))
+        return redirect(_safe_login_redirect(request))
     context = get_custom_config()
     site_token = get_setting_cached("LOGIN_RECAPTCHA_SITE_TOKEN")
     server_token = get_setting_cached("LOGIN_RECAPTCHA_SERVER_TOKEN")
@@ -258,6 +266,8 @@ def index(request):
         return redirect("/update/")
     context = {'segment': 'index'}
     context.update(get_custom_config())
+    if Provider() is None:
+        context["error"] = "博客仓库连接暂不可用，请前往设置检查 Provider 配置"
     cache_obj = Cache.objects.filter(name="posts").first()
     if cache_obj:
         posts = json.loads(cache_obj.content)
@@ -322,8 +332,17 @@ def pages(request):
         return redirect("/update/")
     try:
         context.update(get_custom_config())
-        load_template = request.path.split('/')[-1]
+        load_template = request.path.rstrip('/').split('/')[-1]
+        if not load_template:
+            return index(request)
         context['segment'] = load_template
+        provider_required_pages = (
+            "edit", "new", "posts", "pages", "configs",
+        )
+        if any(page_name in load_template for page_name in provider_required_pages) and Provider() is None:
+            if request.user.is_staff:
+                return redirect("/settings.html?provider_error=1")
+            return index(request)
         if "index" in load_template:
             return index(request)
         elif "edit_talk" in load_template:
@@ -620,7 +639,10 @@ def pages(request):
                 # 更新通道
                 context["ALL_UPDATES"] = json.loads(get_setting_cached("ALL_UPDATES"))
                 context["ALL_PLATFORM_CONFIGS"] = platform_configs()
-                context["NOW_PLATFORM_CONFIG"] = Provider().config["name"]
+                provider = Provider()
+                context["NOW_PLATFORM_CONFIG"] = provider.config["name"] if provider else "Hexo"
+                if provider is None:
+                    context["error"] = "博客仓库连接暂不可用，请重新保存 Provider 配置"
                 # Get Auto Excerpt Settings
                 context["AUTO_EXCERPT_CONFIG"] = get_setting_cached("AUTO_EXCERPT_CONFIG")
                 context["AUTO_EXCERPT_SAVE_KEY"] = json.loads(context["AUTO_EXCERPT_CONFIG"]).get("save_key", "excerpt")
@@ -704,7 +726,7 @@ def pages(request):
         return HttpResponse(html_template.render(context, request))
 
     except Exception as error:
-        logging.error(gettext("PAGE_500").format(repr(e)))
+        logging.error(gettext("PAGE_500").format(repr(error)))
         html_template = loader.get_template('home/page-500.html')
         context["error"] = error
         return HttpResponse(html_template.render(context, request))

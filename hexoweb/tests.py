@@ -8,6 +8,7 @@ import json
 import uuid
 from unittest.mock import Mock, patch
 
+import hexoweb.functions as app_functions
 from hexoweb.models import (
     Cache, SettingModel, ImageModel, FriendModel, 
     NotificationModel, CustomModel, PostModel, TalkModel,
@@ -323,6 +324,24 @@ class ViewsTests(TestCase):
         self.client.force_login(self.user)
         response = self.client.get('/login/')
         self.assertEqual(response.status_code, 302)
+
+    def test_login_view_decodes_safe_local_redirect(self):
+        SettingModel.objects.update_or_create(name="INIT", defaults={"content": "6"})
+        app_functions.clear_setting_cache("INIT")
+        self.client.force_login(self.user)
+
+        response = self.client.get('/login/?next=%252Fsettings.html')
+
+        self.assertRedirects(response, "/settings.html", fetch_redirect_response=False)
+
+    def test_login_view_rejects_external_redirect(self):
+        SettingModel.objects.update_or_create(name="INIT", defaults={"content": "6"})
+        app_functions.clear_setting_cache("INIT")
+        self.client.force_login(self.user)
+
+        response = self.client.get('/login/?next=https%3A%2F%2Fevil.example%2F')
+
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
     
     def test_login_view_accessible_for_anonymous(self):
         """测试匿名用户可以访问登录页面"""
@@ -341,6 +360,21 @@ class ViewsTests(TestCase):
             self.assertTrue(
                 response.url.startswith("/login/?next=") or response.url.startswith("/init/")
             )
+
+    @patch("hexoweb.views.Provider", return_value=None)
+    def test_provider_page_redirects_staff_to_settings_when_unavailable(self, _mock_provider):
+        SettingModel.objects.update_or_create(name="INIT", defaults={"content": "6"})
+        SettingModel.objects.update_or_create(name="JUMP_UPDATE", defaults={"content": "false"})
+        app_functions.clear_setting_cache()
+        self.client.force_login(self.user)
+
+        response = self.client.get('/posts.html')
+
+        self.assertRedirects(
+            response,
+            "/settings.html?provider_error=1",
+            fetch_redirect_response=False,
+        )
 
 
 class MigrateViewDataSafetyTests(TestCase):
@@ -413,6 +447,72 @@ class MigrateViewDataSafetyTests(TestCase):
         self.assertIsNotNone(post)
         self.assertEqual(post.path, "/legacy")
         self.assertEqual(post.filename, "/legacy")
+
+    def test_import_legacy_settings_reseeds_new_defaults(self):
+        legacy_settings = [
+            {"name": "INIT", "content": "6"},
+            {"name": "QEXO_NAME", "content": "Legacy Admin"},
+        ]
+
+        response = self.client.post('/migrate/', {
+            "type": "import_settings",
+            "data": json.dumps(legacy_settings),
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SettingModel.objects.get(name="QEXO_NAME").content, "Legacy Admin")
+        self.assertTrue(SettingModel.objects.filter(name="LANGUAGE").exists())
+        self.assertTrue(SettingModel.objects.filter(name="ALL_CDN_PREV").exists())
+
+
+class ProviderCompatibilityTests(TestCase):
+    def setUp(self):
+        app_functions._Provider = None
+        app_functions._provider_retry_after = 0
+        app_functions._provider_last_error = None
+
+    @patch("hexoweb.functions.get_provider")
+    def test_legacy_provider_settings_are_recovered(self, mock_get_provider):
+        expected_provider = Mock()
+        mock_get_provider.return_value = expected_provider
+        SettingModel.objects.bulk_create([
+            SettingModel(name="GH_TOKEN", content="test-token"),
+            SettingModel(name="GH_REPO", content="owner/repo"),
+            SettingModel(name="GH_REPO_BRANCH", content="main"),
+            SettingModel(name="GH_REPO_PATH", content="blog"),
+        ])
+
+        provider = app_functions.Provider(force_refresh=True)
+
+        self.assertIs(provider, expected_provider)
+        mock_get_provider.assert_called_once_with(
+            "github",
+            token="test-token",
+            repo="owner/repo",
+            branch="main",
+            path="blog",
+            config="Hexo",
+        )
+        normalized = json.loads(SettingModel.objects.get(name="PROVIDER").content)
+        self.assertEqual(normalized["params"]["path"], "blog")
+
+    @patch("hexoweb.functions.update_provider", side_effect=RuntimeError("provider down"))
+    def test_provider_failure_is_throttled_and_degraded(self, mock_update_provider):
+        self.assertIsNone(app_functions.Provider())
+        self.assertIsNone(app_functions.Provider())
+
+        mock_update_provider.assert_called_once()
+        self.assertIn("RuntimeError", app_functions.get_provider_error())
+
+    @patch("hexoweb.functions.Provider", return_value=None)
+    def test_provider_cache_falls_back_to_existing_data(self, _mock_provider):
+        Cache.objects.create(name="posts", content=json.dumps([
+            {"name": "cached post", "path": "source/_posts/cached.md"},
+        ]))
+
+        posts = app_functions.update_posts_cache()
+
+        self.assertEqual(posts[0]["name"], "cached post")
 
 
 # ===== 查询和性能测试 =====
