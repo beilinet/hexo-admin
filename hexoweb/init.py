@@ -2,9 +2,12 @@ import json
 import random
 import os
 import hashlib
+import logging
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
+
+import requests
 
 from django.contrib.auth import get_user_model
 
@@ -224,10 +227,15 @@ class InitService:
         if not project_id or not vercel_token:
             return StepOutcome(False, "4", gettext("VERIFY_FAILED"), {
                 "project_id": project_id,
-                "vercel_token": vercel_token,
             })
         try:
-            checkBuilding(project_id, vercel_token)
+            try:
+                checkBuilding(project_id, vercel_token, timeout=2.5)
+            except requests.Timeout:
+                # Vercel Functions on the Hobby plan have a short request limit.
+                # A slow control-plane response must not leave setup permanently
+                # stuck; normal update operations will validate these values again.
+                logging.warning("Timed out validating Vercel credentials during initialization")
             save_setting("VERCEL_TOKEN", vercel_token)
             save_setting("PROJECT_ID", project_id)
             save_setting("INIT", "6")
@@ -240,5 +248,4 @@ class InitService:
         except Exception:
             return StepOutcome(False, "4", gettext("VERIFY_FAILED"), {
                 "project_id": project_id,
-                "vercel_token": vercel_token,
             })

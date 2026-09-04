@@ -7,6 +7,7 @@ from django.urls import resolve, reverse
 from django.contrib.auth.models import User
 import json
 import hashlib
+import requests
 import uuid
 from unittest.mock import Mock, patch
 
@@ -143,6 +144,29 @@ class InitSettingsTests(TestCase):
 
         self.assertEqual(SettingModel.objects.get(name="QEXO_NAME").content, "My Blog")
         self.assertEqual(SettingModel.objects.count(), len(ALL_SETTINGS))
+
+
+class InitVercelStepTests(TestCase):
+    @patch("hexoweb.init.checkBuilding", side_effect=requests.Timeout)
+    def test_vercel_timeout_does_not_block_initialization(self, check_building):
+        User.objects.create_user(username="admin", password="test-password")
+
+        outcome = InitService().handle_vercel_step("prj_test", "token_test")
+
+        self.assertTrue(outcome.success)
+        self.assertEqual(outcome.step, "6")
+        self.assertEqual(SettingModel.objects.get(name="PROJECT_ID").content, "prj_test")
+        self.assertEqual(SettingModel.objects.get(name="VERCEL_TOKEN").content, "token_test")
+        self.assertEqual(SettingModel.objects.get(name="INIT").content, "6")
+        check_building.assert_called_once_with("prj_test", "token_test", timeout=2.5)
+
+    @patch("hexoweb.init.checkBuilding", side_effect=requests.HTTPError)
+    def test_vercel_http_error_does_not_echo_token(self, _check_building):
+        outcome = InitService().handle_vercel_step("prj_test", "token_test")
+
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.context, {"project_id": "prj_test"})
+        self.assertFalse(SettingModel.objects.filter(name="VERCEL_TOKEN").exists())
 
 
 class ImageModelTests(TestCase):

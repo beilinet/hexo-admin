@@ -680,14 +680,17 @@ def get_project_detail():
             "id": get_setting("PROJECT_ID")}
 
 
-def checkBuilding(projectId, token):
+def checkBuilding(projectId, token, timeout=5):
     r = 0
     url = "https://api.vercel.com/v6/deployments/?projectId=" + projectId
     header = dict()
     header["Authorization"] = "Bearer " + token
     header["Content-Type"] = "application/json"
-    response = requests.get(url, headers=header).json()
-    result = response["deployments"]
+    response = requests.get(url, headers=header, timeout=timeout)
+    response.raise_for_status()
+    result = response.json().get("deployments")
+    if not isinstance(result, list):
+        raise ValueError("Vercel deployments response is invalid")
     for deployment in result:
         if deployment['state'] == "BUILDING" or deployment['state'] == "INITIALIZING":
             r += 1
